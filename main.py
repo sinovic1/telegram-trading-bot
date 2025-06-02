@@ -1,64 +1,82 @@
+# main.py
 import logging
 import asyncio
-import telegram
+import httpx
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import os
+from datetime import datetime
+import random
 
-# === CONFIGURATION ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7923000946:AAGkHu782eQXxhLF4IU1yNCyJO5ruXZhUtc")
-AUTHORIZED_USER_ID = 7469299312
+# Constants
+TOKEN = "7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8"
+OWNER_ID = 7469299312
+PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD"]
 
-# === LOGGING SETUP ===
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === SCHEDULER SETUP ===
-scheduler = AsyncIOScheduler()
+# Simulated strategy checkers (replace with real logic)
+def check_rsi(pair): return random.choice([True, False])
+def check_macd(pair): return random.choice([True, False])
+def check_ema(pair): return random.choice([True, False])
+def check_bollinger(pair): return random.choice([True, False])
 
-# === DELETE WEBHOOK ON START ===
-async def delete_webhook():
-    try:
-        bot = telegram.Bot(BOT_TOKEN)
-        await bot.delete_webhook()
-        logger.info("✅ Webhook deleted.")
-    except Exception as e:
-        logger.error(f"❌ Failed to delete webhook: {e}")
+# Signal checker
+async def check_signals(application):
+    for pair in PAIRS:
+        rsi = check_rsi(pair)
+        macd = check_macd(pair)
+        ema = check_ema(pair)
+        boll = check_bollinger(pair)
 
-# === /STATUS COMMAND ===
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == AUTHORIZED_USER_ID:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Everything is working fine.")
-    else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="🚫 Unauthorized.")
+        true_count = sum([rsi, macd, ema, boll])
+        if true_count >= 2:
+            entry = round(random.uniform(1.0, 1.5), 4)
+            tp1 = round(entry + 0.0020, 4)
+            tp2 = round(entry + 0.0040, 4)
+            tp3 = round(entry + 0.0060, 4)
+            sl = round(entry - 0.0030, 4)
+            message = (
+                f"📈 Signal for {pair}\n"
+                f"Entry: {entry}\n"
+                f"Take Profit 1: {tp1}\n"
+                f"Take Profit 2: {tp2}\n"
+                f"Take Profit 3: {tp3}\n"
+                f"Stop Loss: {sl}"
+            )
+            await application.bot.send_message(chat_id=OWNER_ID, text=message)
 
-# === DUMMY STRATEGY CHECK ===
-async def check_signals():
-    logger.info("📊 Checking signals... (simulate signal logic here)")
+# /status command
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == OWNER_ID:
+        await update.message.reply_text("✅ Bot is running and active.")
 
-# === MAIN FUNCTION ===
+# Crash alert
+def setup_crash_handler(application):
+    def handle_exception(loop, context):
+        msg = f"❌ Bot crashed: {context.get('exception') or context['message']}"
+        asyncio.create_task(application.bot.send_message(chat_id=OWNER_ID, text=msg))
+        loop.default_exception_handler(context)
+    loop = asyncio.get_event_loop()
+    loop.set_exception_handler(handle_exception)
+
+# Main async function
 async def main():
-    await delete_webhook()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("status", status))
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("status", status_command))
-
-    scheduler.add_job(check_signals, "interval", minutes=1)
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check_signals, "interval", seconds=60, args=[app])
     scheduler.start()
 
+    setup_crash_handler(app)
     logger.info("🤖 Bot started with polling...")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    await app.updater.idle()
+    await app.bot.delete_webhook()
+    await app.run_polling()
 
-# === ENTRY POINT ===
-loop = asyncio.get_event_loop()
-loop.run_until_complete(main())
+if __name__ == "__main__":
+    asyncio.run(main())
+
 
