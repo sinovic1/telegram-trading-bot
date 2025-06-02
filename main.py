@@ -1,5 +1,4 @@
 import logging
-import pytz
 import asyncio
 import telegram
 from telegram import Update
@@ -9,80 +8,57 @@ from telegram.ext import (
     ContextTypes,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-from datetime import datetime
+import os
 
-# === BOT CONFIG ===
-BOT_TOKEN = '7923000946:AAGkHu782eQXxhLF4IU1yNCyJO5ruXZhUtc'
-OWNER_ID = 7469299312
+# === CONFIGURATION ===
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7923000946:AAGkHu782eQXxhLF4IU1yNCyJO5ruXZhUtc")
+AUTHORIZED_USER_ID = 7469299312
 
-# === LOGGING ===
+# === LOGGING SETUP ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === STRATEGY PLACEHOLDER ===
-def generate_signal():
-    return {
-        "pair": "EUR/USD",
-        "entry": 1.0850,
-        "tp1": 1.0870,
-        "tp2": 1.0890,
-        "tp3": 1.0910,
-        "sl": 1.0820
-    }
+# === SCHEDULER SETUP ===
+scheduler = AsyncIOScheduler()
 
-# === STATUS CHECK ===
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Bot is running fine.")
-
-# === SIGNAL SENDER ===
-async def check_signals():
+# === DELETE WEBHOOK ON START ===
+async def delete_webhook():
     try:
-        signal = generate_signal()
-        text = (
-            f"📉 *New Signal Detected!*\n\n"
-            f"*Pair:* {signal['pair']}\n"
-            f"*Entry:* {signal['entry']}\n"
-            f"*TP1:* {signal['tp1']}\n"
-            f"*TP2:* {signal['tp2']}\n"
-            f"*TP3:* {signal['tp3']}\n"
-            f"*SL:* {signal['sl']}"
-        )
-        await application.bot.send_message(chat_id=OWNER_ID, text=text, parse_mode="Markdown")
+        bot = telegram.Bot(BOT_TOKEN)
+        await bot.delete_webhook()
+        logger.info("✅ Webhook deleted.")
     except Exception as e:
-        logger.error(f"Error sending signal: {e}")
-        await application.bot.send_message(chat_id=OWNER_ID, text=f"⚠️ Error: {e}")
+        logger.error(f"❌ Failed to delete webhook: {e}")
+
+# === /STATUS COMMAND ===
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == AUTHORIZED_USER_ID:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Everything is working fine.")
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="🚫 Unauthorized.")
+
+# === DUMMY STRATEGY CHECK ===
+async def check_signals():
+    logger.info("📊 Checking signals... (simulate signal logic here)")
 
 # === MAIN FUNCTION ===
 async def main():
-    global application
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    await delete_webhook()
 
-    # Force delete any existing webhook to avoid conflict
-    try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Webhook deleted.")
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to delete webhook: {e}")
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Add handlers
-    application.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("status", status_command))
 
-    # Start scheduled jobs
-    scheduler = AsyncIOScheduler(timezone=pytz.utc)
-    scheduler.add_job(check_signals, IntervalTrigger(minutes=15))
+    scheduler.add_job(check_signals, "interval", minutes=1)
     scheduler.start()
 
-    # Run polling
     logger.info("🤖 Bot started with polling...")
-    await application.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
 # === ENTRY POINT ===
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+loop = asyncio.get_event_loop()
+loop.run_until_complete(main())
 
