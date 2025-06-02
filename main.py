@@ -1,117 +1,147 @@
+import os
 import logging
-import time
+import pytz
+import requests
 import pandas as pd
-import yfinance as yf
-from telegram import Bot, Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+import ta
+from telegram import Update, Bot
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
+from pytz import utc
 
-# === SETTINGS ===
-TELEGRAM_TOKEN = '7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8'
+# === CONFIG ===
+TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USER_ID = 7469299312
-PAIR_LIST = ['EURUSD=X', 'GBPUSD=X', 'USDJPY=X', 'USDCHF=X', 'AUDUSD=X', 'USDCAD=X']
+PAIRS = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD']
+TIMEZONE = utc
 
-# === LOGGING ===
+# === LOGGER ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === STRATEGIES ===
-def rsi_strategy(df):
-    delta = df['Close'].diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    avg_gain = up.rolling(14).mean()
-    avg_loss = down.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    df['RSI'] = rsi
-    return rsi.iloc[-1] < 30 or rsi.iloc[-1] > 70
+# === ANALYSIS STRATEGIES ===
+def fetch_data(pair):
+    url = f"https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol={pair[:3]}&to_symbol={pair[3:]}&interval=15min&apikey=demo"
+    r = requests.get(url)
+    data = r.json()
+    try:
+        df = pd.DataFrame.from_dict(data['Time Series FX (15min)'], orient='index', dtype=float)
+        df.columns = ['open', 'high', 'low', 'close']
+        df.sort_index(inplace=True)
+        return df
+    except:
+        return None
 
-def macd_strategy(df):
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
-    return macd.iloc[-1] > signal.iloc[-1] or macd.iloc[-1] < signal.iloc[-1]
+def analyze(df):
+    signals = []
 
-def ema_strategy(df):
-    ema50 = df['Close'].ewm(span=50).mean()
-    ema200 = df['Close'].ewm(span=200).mean()
-    return ema50.iloc[-1] > ema200.iloc[-1] or ema50.iloc[-1] < ema200.iloc[-1]
+    # Indicators
+    df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
+    df['ema'] = ta.trend.EMAIndicator(df['close'], window=20).ema_indicator()
+    macd = ta.trend.MACD(df['close'])
+    df['macd'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
+    bb = ta.volatility.BollingerBands(df['close'])
+    df['bb_upper'] = bb.bollinger_hband()
+    df['bb_lower'] = bb.bollinger_lband()
 
-def bollinger_strategy(df):
-    sma = df['Close'].rolling(20).mean()
-    std = df['Close'].rolling(20).std()
-    upper = sma + 2 * std
-    lower = sma - 2 * std
-    return df['Close'].iloc[-1] < lower.iloc[-1] or df['Close'].iloc[-1] > upper.iloc[-1]
+    last = df.iloc[-1]
 
-# === SIGNAL GENERATOR ===
+    # Strategy Agreement Counter
+    count = 0
+
+    # RSI
+    if last['rsi'] < 30:
+        count += 1
+        signals.append("📉 RSI: OVERSOLD")
+    elif last['rsi'] > 70:
+        count += 1
+        signals.append("📈 RSI: OVERBOUGHT")
+
+    # EMA
+    if last['close'] > last['ema']:
+        count += 1
+        signals.append("📈 Price > EMA")
+    else:
+        signals.append("📉 Price < EMA")
+
+    # MACD
+    if last['macd'] > last['macd_signal']:
+        count += 1
+        signals.append("📈 MACD Crossover")
+    else:
+        signals.append("📉 MACD Bearish")
+
+    # Bollinger Bands
+    if last['close'] < last['bb_lower']:
+        count += 1
+        signals.append("📉 Below Lower BB")
+    elif last['close'] > last['bb_upper']:
+        count += 1
+        signals.append("📈 Above Upper BB")
+
+    return count, signals, last['close']
+
+def generate_signal(pair):
+    df = fetch_data(pair)
+    if df is None or len(df) < 30:
+        return None
+
+    count, signals, price = analyze(df)
+
+    if count >= 2:
+        tp1 = round(price * 1.002, 5)
+        tp2 = round(price * 1.004, 5)
+        tp3 = round(price * 1.006, 5)
+        sl = round(price * 0.996, 5)
+        return f"🔔 Signal for {pair}:\nPrice: {price}\n" + "\n".join(signals) + f"\n🎯 TP1: {tp1}\n🎯 TP2: {tp2}\n🎯 TP3: {tp3}\n🛑 SL: {sl}"
+    return None
+
+# === TELEGRAM BOT ===
+bot = Bot(token=TOKEN)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ALLOWED_USER_ID:
+        await update.message.reply_text("✅ Bot is running.")
+    else:
+        await update.message.reply_text("⛔️ Not authorized.")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ALLOWED_USER_ID:
+        await update.message.reply_text("✅ Everything is working fine.")
+    else:
+        await update.message.reply_text("⛔️ Not authorized.")
+
+async def warn_user():
+    await bot.send_message(chat_id=ALLOWED_USER_ID, text="⚠️ Warning: Signal loop has stopped!")
+
+# === SCHEDULER LOOP ===
 def check_signals():
-    bot = Bot(TELEGRAM_TOKEN)
-    for symbol in PAIR_LIST:
+    try:
+        for pair in PAIRS:
+            signal = generate_signal(pair)
+            if signal:
+                bot.send_message(chat_id=ALLOWED_USER_ID, text=signal)
+    except Exception as e:
+        logger.error(f"Signal loop error: {e}")
         try:
-            df = yf.download(symbol, period='7d', interval='1h')
-            if df.empty:
-                continue
-            triggered = []
-            if rsi_strategy(df): triggered.append('RSI')
-            if macd_strategy(df): triggered.append('MACD')
-            if ema_strategy(df): triggered.append('EMA')
-            if bollinger_strategy(df): triggered.append('Bollinger')
-
-            if len(triggered) >= 2:
-                current_price = df['Close'].iloc[-1]
-                tp1 = round(current_price * 1.002, 5)
-                tp2 = round(current_price * 1.004, 5)
-                tp3 = round(current_price * 1.006, 5)
-                sl = round(current_price * 0.998, 5)
-                message = (
-                    f"📊 Signal for {symbol.replace('=X', '')}\n"
-                    f"Triggered Strategies: {', '.join(triggered)}\n"
-                    f"Entry: {current_price:.5f}\n"
-                    f"🎯 TP1: {tp1}\n"
-                    f"🎯 TP2: {tp2}\n"
-                    f"🎯 TP3: {tp3}\n"
-                    f"🛑 SL: {sl}"
-                )
-                bot.send_message(chat_id=ALLOWED_USER_ID, text=message)
-        except Exception as e:
-            logger.error(f"Error checking {symbol}: {e}")
-
-# === COMMAND HANDLERS ===
-def start(update: Update, context: CallbackContext):
-    if update.effective_user.id != ALLOWED_USER_ID:
-        return
-    update.message.reply_text("🤖 Bot is running!")
-
-def status(update: Update, context: CallbackContext):
-    if update.effective_user.id != ALLOWED_USER_ID:
-        return
-    update.message.reply_text("✅ Everything is working fine.")
-
-# === ERROR HANDLER ===
-def error_handler(update: object, context: CallbackContext) -> None:
-    logger.error(msg="Exception while handling update:", exc_info=context.error)
+            bot.send_message(chat_id=ALLOWED_USER_ID, text=f"⚠️ Error in signal loop:\n{e}")
+        except:
+            pass
 
 # === MAIN ===
 def main():
-    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    app = ApplicationBuilder().token(TOKEN).build()
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("status", status))
-    dp.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
 
-    # Run signal check every 15 minutes
-    scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler(timezone=TIMEZONE)
     scheduler.add_job(check_signals, 'interval', minutes=15)
     scheduler.start()
 
-    logger.info("Bot started. Polling...")
-    updater.start_polling()
-    updater.idle()
+    logger.info("Scheduler started")
+    app.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
